@@ -6,6 +6,7 @@
  *
  * Copyright (C) 2012-2013 Udo Steinberg, Intel Corporation.
  * Copyright (C) 2014 Udo Steinberg, FireEye, Inc.
+ * Copyright (C) 2014-2015 Alexander Boettcher, Genode Labs GmbH.
  *
  * This file is part of the NOVA microhypervisor.
  *
@@ -22,8 +23,9 @@
 #pragma once
 
 #include "ec.hpp"
+#include "si.hpp"
 
-class Sm : public Kobject, public Queue<Ec>
+class Sm : public Kobject, public Refcount, public Queue<Ec>, public Queue<Si>, public Si
 {
     private:
         mword counter;
@@ -39,8 +41,14 @@ class Sm : public Kobject, public Queue<Ec>
             delete sm;
         }
 
+        mword reset() {
+            mword c = counter;
+            counter = 0;
+            return c;
+        }
+
     public:
-        Sm (Pd *, mword, mword = 0);
+        Sm (Pd *, mword, mword = 0, Sm * = nullptr, mword = 0);
         ~Sm ()
         {
             while (!counter)
@@ -54,12 +62,17 @@ class Sm : public Kobject, public Queue<Ec>
 
                 if (counter) {
                     counter = zero ? 0 : counter - 1;
+
+                    Si * si;
+                    if (Queue<Si>::dequeue(si = Queue<Si>::head()))
+                        ec->set_si_regs(si->value, static_cast <Sm *>(si)->reset());
+
                     return;
                 }
 
                 ec->add_ref();
 
-                enqueue (ec);
+                Queue<Ec>::enqueue (ec);
             }
 
             if (!block)
@@ -71,7 +84,7 @@ class Sm : public Kobject, public Queue<Ec>
         }
 
         ALWAYS_INLINE
-        inline void up(void (*c)() = nullptr)
+        inline void up (void (*c)() = nullptr, Sm * si = nullptr)
         {
             Ec *ec;
 
@@ -79,7 +92,13 @@ class Sm : public Kobject, public Queue<Ec>
 
                 loop:
 
-                if (!dequeue (ec = head())) {
+                if (!Queue<Ec>::dequeue (ec = Queue<Ec>::head())) {
+
+                    if (si) {
+                       if (si->queued()) return;
+                       Queue<Si>::enqueue(si);
+                    }
+
                     counter++;
                     return;
                 }
@@ -88,6 +107,8 @@ class Sm : public Kobject, public Queue<Ec>
                     delete ec;
                     goto loop;
                 }
+
+                if (si) ec->set_si_regs(si->value, si->reset());
             }
 
             ec->release (c);
@@ -98,7 +119,7 @@ class Sm : public Kobject, public Queue<Ec>
         {
             {   Lock_guard <Spinlock> guard (lock);
 
-                if (!dequeue (ec))
+                if (!Queue<Ec>::dequeue (ec))
                     return;
             }
 
